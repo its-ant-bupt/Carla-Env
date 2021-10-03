@@ -1,12 +1,16 @@
 import carla
 import time
 import random
+
+import matplotlib.pyplot as plt
 import numpy as np
 import math
 import networkx as nx
 
 import os
 import pygame
+from PIL import Image
+
 import carla_env_settings as settings
 import Controller2D
 import cutils
@@ -17,6 +21,7 @@ import utils
 import utils_for_waypoints
 import argparse
 from matplotlib import cm
+
 
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -151,7 +156,7 @@ def env_args():
     argparser.add_argument(
         '--points_per_second',
         metavar='N',
-        default='100000',
+        default='400000',
         type=int,
         help='lidar points per second (default: 100000)')
     argparser.add_argument(
@@ -163,6 +168,29 @@ def env_args():
     args.width, args.height = [int(x) for x in args.res.split('x')]
     args.dot_extent -= 1
     return args
+
+
+def get_font():
+    fonts = [x for x in pygame.font.get_fonts()]
+    default_font = 'ubuntumono'
+    font = default_font if default_font in fonts else fonts[0]
+    font = pygame.font.match_font(font)
+    return pygame.font.Font(font, 14)
+
+
+def get_next_point(current_location, current_yaw, degree_delta, radius):
+    '''
+    Take a point from a circle centered on the vehicle with radius and degree delta
+    :param current_location: The current location of vehicle
+    :param current_yaw: The current yaw of vehicle driving [0,360]
+    :param degree_delta: The delta degree from the current yaw [-180,180]
+    :param radius: The radius for taking point [m]
+    :return: next point
+    '''
+    _yaw = math.radians(current_yaw + degree_delta)
+    next_x = current_location.x + radius * np.cos(_yaw)
+    next_y = current_location.y + radius * np.sin(_yaw)
+    return next_x, next_y
 
 
 class CarlaEnv:
@@ -383,6 +411,17 @@ class CarlaEnv:
         for i in range(len(self.main_vehicles)):
             x = vehicles_transform[i].location.x
             y = vehicles_transform[i].location.y
+            # todo test radius next point
+            # next_x, next_y = get_next_point(vehicles_transform[i].location, vehicles_yaw[i], -5, 50)
+            # distance = utils.distance_to_point(x, y, next_x, next_y)
+            # next_points = utils.inter_two_point([x, y, 0], [next_x, next_y, 0], distance, 0.5)
+            # for point in next_points:
+            #     self.debug.draw_point(
+            #         location=carla.Location(x=point[0], y=point[1], z=1),
+            #         color=carla.Color(0, 255, 255),
+            #         life_time=0.1
+            #     )
+
             # 更新车辆的位置状态
 
             yaw = math.radians(vehicles_yaw[i])
@@ -521,13 +560,6 @@ class CarlaEnv:
             # 带有权重的边
             self.G.add_weighted_edges_from([(waypoint1_info, waypoint2_info, distance)])
 
-    def get_font(self):
-        fonts = [x for x in pygame.font.get_fonts()]
-        default_font = 'ubuntumono'
-        font = default_font if default_font in fonts else fonts[0]
-        font = pygame.font.match_font(font)
-        return pygame.font.Font(font, 14)
-
     def lidar_data(self, lidar_image, lidar_measurement, lidar_sensor, lidar_camera):
         # Build the K projection matrix:
         # K = [[Fx,  0, image_w/2],
@@ -644,8 +676,36 @@ class CarlaEnv:
                 u_coord[i] - self.args.dot_extent: u_coord[i] + self.args.dot_extent] = color_map[i]
         return im_array
 
+    def lidar_matrix(self, lidar_measurement):
+        inter = 5
+        width = int(self.args.range/inter)
+        _lidar_matrix = [[0 for _ in range(2*width)] for _ in range(2*width)]
+        for location in lidar_measurement:
+            _x = location.point.x/inter
+            _y = location.point.y/inter
+            _z = round(location.point.z, 1)
+            X = abs(int(_x))
+            Y = abs(int(_y))
+            if _x >= 0:
+                if _y >= 0:
+                    _lidar_matrix[width + X][width - 1 - Y] = max(_lidar_matrix[width + X][width - 1 - Y], _z)
+                else:
+                    _lidar_matrix[width + X][width + Y] = max(_lidar_matrix[width + X][width + Y], _z)
+            else:
+                if _y >= 0:
+                    _lidar_matrix[width - 1 - X][width - 1 - Y] = max(_lidar_matrix[width - 1 - X][width - 1 - Y], _z)
+                else:
+                    _lidar_matrix[width - 1 - X][width + Y] = max(_lidar_matrix[width - 1 - X][width + Y], _z)
+        _lidar_matrix = np.array(_lidar_matrix)
+        # high_list = []
+        # for i in range(20):
+        #     high_list.append(0.1 * i)
+        # for i in range(len(high_list)-1):
+        #     _lidar_matrix[high_list[i + 1] > _lidar_matrix > high_list[i]] = high_list[i + 1]
+        return _lidar_matrix
+
     def run(self, display):
-        font = self.get_font()
+        font = get_font()
         with SyncMode.CarlaSyncMode(self.world, self.equipment_actors[0][0], self.equipment_actors[0][1], fps=30) as sync_mode:
             frame = -1
             done = False
@@ -657,6 +717,19 @@ class CarlaEnv:
                 self.clock.tick()
 
                 snapshot, image_rgb_look, lidar_measurement = sync_mode.tick(timeout = 2.0)
+                lidar_matrix = self.lidar_matrix(lidar_measurement)
+                # todo matplot test
+                start = int(-1 * self.args.range/5)
+                end = int(self.args.range/5)
+                _x = np.arange(start, end, 1)
+                _y = np.arange(start, end, 1)
+                _x, _y = np.meshgrid(_x, _y)
+                _z = lidar_matrix
+                plt.figure()
+                plt.contourf(_x, _y, _z)
+                plt.contour(_x, _y, _z)
+                plt.savefig('./matplot/%s.jpg' % frame)
+                # plt.show()
                 vehicles_transform, vehicles_speed = self.step_control(sync_mode.frame, snapshot, frame = frame)
                 frame += 1
                 result = self.step_update(vehicles_transform, vehicles_speed)
@@ -667,6 +740,8 @@ class CarlaEnv:
                 else:
                     image_array = self.lidar_data(image_rgb_look, lidar_measurement,
                                                   self.equipment_actors[0][1], self.equipment_actors[0][0])
+                    image_array_save = Image.fromarray(np.uint8(image_array))
+                    image_array_save.save("out/%08d.png" % frame)
                     draw_image_array(display, image_array)
                 display.blit(
                     font.render('%s frame' % frame, True, (255, 255, 255)),
@@ -685,7 +760,7 @@ def main():
     )
     try:
         env = CarlaEnv(args = args)
-        build_time = env.reset(main_vehicle_nums = 1, background_vehicle_nums = 40)
+        build_time = env.reset(main_vehicle_nums = 1, background_vehicle_nums = 50)
         print("The reset time is %s" % build_time)
         env.run(display)
     finally:
